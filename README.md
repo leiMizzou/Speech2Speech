@@ -2,6 +2,9 @@
 
 基于ASR+LLM+TTS的智能对话框架，实现语音到语音的实时交互系统。目前主要应用于心理咨询场景。
 
+ASR和TTS系统自己找网上开源的自行安装就行，使用其自带的API，代码中的ASR TTS URL指的就是这些
+LLM API目前用的Deepseek，请自行申请替换
+
 ## 系统架构
 
 ### ASR（语音识别）
@@ -89,7 +92,7 @@ self.conversation_history = deque(maxlen=10)
 消息格式：
 ```python
 messages = [
-    {"role": "system", "content": "你是回龙观医院心理科王医生..."},
+    {"role": "system", "content": "你是ABC医院王医生..."},
     {"role": "user", "content": user_input},
     {"role": "assistant", "content": ai_response}
 ]
@@ -175,8 +178,8 @@ ipywidgets
 ```python
 config = {
     "deepseek_api_key": "your-api-key", #请自行至DeepSeek.com申请，新注册会赠百万Token
-    "tts_url": "http://127.0.0.1:9880",
-    "asr_url": "wss://your-asr-server:10096",
+    "tts_url": "http://127.0.0.1:9880", #用你自建的或s2s.ipynb配置中的值就行
+    "asr_url": "wss://your-asr-server:10096", #用你自建的或s2s.ipynb配置中的值就行
     "db_path": "mental_health_resources.db",
     "debug": True
 }
