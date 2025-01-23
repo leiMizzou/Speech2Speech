@@ -1,0 +1,26 @@
+# Core ML & Data Processing
+numpy>=1.21.0
+torch>=2.0.0
+faiss-cpu>=1.7.4
+sentence-transformers>=2.2.0
+openai>=1.0.0
+tqdm>=4.65.0
+
+# Audio Processing
+pyaudio>=0.2.13
+sounddevice>=0.4.6
+soundfile>=0.12.1
+
+# Communication
+websockets>=10.4
+requests>=2.31.0
+
+# Async Support
+nest-asyncio>=1.5.6
+
+# File Format Support
+wave
+
+# IDE Support (Optional)
+notebook
+ipykernel
