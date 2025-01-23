@@ -115,7 +115,15 @@ triggers = {
 
 ## 快速开始
 
-### 系统依赖
+### 模型下载说明
+
+首次运行会自动下载以下模型：
+1. `shibing624/text2vec-base-chinese`（约500MB）：用于文本向量化
+2. `BAAI/bge-reranker-base`（约500MB）：用于结果重排序
+
+模型会缓存在本地，后续运行无需重新下载。
+
+## 系统依赖
 
 macOS:
 ```bash
@@ -160,6 +168,7 @@ wave
 # IDE Support (Optional)
 notebook
 ipykernel
+ipywidgets
 ```
 
 ### 基础配置
