@@ -4,7 +4,8 @@
 
 ## 视频演示
 
-查看<video src="examples/demo.mov" controls width="640"></video>文件了解系统的实际运行效果。
+系统的实际运行效果。
+<video src="examples/demo.mov" controls width="640"></video>
 
 ## 系统架构
 
