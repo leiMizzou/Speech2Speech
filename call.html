@@ -2,18 +2,21 @@
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>语音问诊（带会话记忆示例）</title>
+    <title>语音问诊（自动滚动 & 10轮会话记忆）</title>
     <style>
         body { margin: 0; font-family: system-ui; }
         .container { max-width: 800px; margin: 0 auto; height: 100vh; display: flex; }
         
+        /* 左侧调试信息面板 */
         .status-panel {
             width: 300px;
             background: #1f2937;
             color: #e5e7eb;
             padding: 1rem;
-            overflow-y: auto;
+            overflow-y: auto; /* 允许垂直滚动 */
             font-family: monospace;
+            display: flex;
+            flex-direction: column; /* 正常从上到下插入日志 */
         }
         .status-item {
             margin: 0.5rem 0;
@@ -25,6 +28,7 @@
         .status-success { border-color: #10b981; }
         .status-error { border-color: #ef4444; }
         
+        /* 右侧主内容区 */
         .main-container {
             flex: 1;
             display: flex;
@@ -127,13 +131,13 @@
 </head>
 <body>
     <div class="container">
-        <!-- 状态日志面板（调试信息） -->
+        <!-- 左侧面板：显示调试日志 -->
         <div id="statusPanel" class="status-panel">
             <h3>调试信息</h3>
             <div id="statusLogs"></div>
         </div>
         
-        <!-- 主体区域 -->
+        <!-- 右侧主内容区：聊天界面、控制按钮等 -->
         <div class="main-container">
             <div class="header">
                 <div class="doctor-info">
@@ -157,7 +161,7 @@
         </div>
     </div>
 
-    <!-- 音频处理器工作线程代码 -->
+    <!-- 音频处理器工作线程代码：AudioWorklet -->
     <script type="text/worklet" id="audioWorkletScript">
         class AudioProcessor extends AudioWorkletProcessor {
             constructor() {
@@ -195,51 +199,52 @@
     </script>
 
     <script>
-        //================== 全局状态 & 变量 ==================//
+        //================== 1. 全局状态 & 变量 ==================//
 
-        // 保存最多 10 轮的对话（用户+AI 一轮），即最大 20 条消息
-        // 结构示例：[{ role: 'user', content: '...' }, { role: 'assistant', content: '...' }, ...]
+        // 保存最多 10 轮对话（用户+AI），即最多 20 条消息
         let conversationMemory = [];
 
-        // 用来跟踪通话状态
-        let isCallActive = false;
-        let isMuted = false;
-        let ws = null;
-        let audioStream = null;
-        let audioContext = null; // 用于录音
+        let isCallActive = false;  // 是否正在通话
+        let isMuted = false;       // 是否静音
+        let ws = null;            // WebSocket
+        let audioStream = null;   // 麦克风流
+        let audioContext = null;  // 用于录音的 AudioContext
         let audioWorkletNode = null;
 
-        // 用于播放 TTS 的全局 AudioContext（避免频繁创建/关闭）
+        // 用于播放 TTS 的全局 AudioContext（避免频繁创建或关闭）
         let globalAudioContext = null;
+        let currentTTSSource = null;   // 当前 TTS 音频源
+        let currentTTSContext = null;  // 当前 TTS 播放使用的 AudioContext
 
-        // 当前正在播放的 TTS 来源
-        let currentTTSSource = null;
-        let currentTTSContext = null;
-
-        // 用于合并短暂停顿导致的多次 "2pass-offline" 识别结果
+        // 短暂停顿合并
         let pendingText = "";
         let finalTimer = null;
-        const WAIT_MS = 1000; // 等待 1秒
+        const WAIT_MS = 1000; // 1 秒
 
-        // DOM元素
+        // 获取页面元素
         const chatContainer = document.getElementById('chatContainer');
         const callBtn = document.getElementById('callBtn');
         const muteBtn = document.getElementById('muteBtn');
         const interruptBtn = document.getElementById('interruptBtn');
         const callStatus = document.querySelector('.call-status');
         const statusLogs = document.getElementById('statusLogs');
+        const statusPanel = document.getElementById('statusPanel');
 
-        //================== 日志 & UI 辅助函数 ==================//
+        //================== 2. 日志 & UI 辅助函数 ==================//
 
+        // 在左侧调试信息面板添加日志，并自动滚动到底部
         function addStatusLog(message, type = 'info') {
             const timestamp = new Date().toLocaleTimeString();
             const div = document.createElement('div');
             div.className = `status-item status-${type}`;
             div.innerHTML = `[${timestamp}] ${message}`;
             statusLogs.appendChild(div);
-            statusLogs.scrollTop = statusLogs.scrollHeight;
+
+            // 自动滚动到底部
+            statusPanel.scrollTop = statusPanel.scrollHeight;
         }
 
+        // 向聊天窗口中添加一条消息
         function addMessage(content, type = 'system', resources = []) {
             const div = document.createElement('div');
             div.className = `message ${type}-message`;
@@ -260,92 +265,39 @@
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }
 
-        //================== 与AI交互 & TTS 播放 ==================//
+        //================== 3. 会话记忆管理函数 ==================//
 
-        // 构造对话上下文（包含 system 提示 + 最近 10 轮对话 + 当前用户问题）
+        // 将最新的一条对话(用户/AI)存入会话记忆
+        // 如果长度超过 20 条，则丢弃最早的
+        function updateConversationMemory(role, content) {
+            conversationMemory.push({ role, content });
+            while (conversationMemory.length > 20) {
+                conversationMemory.shift(); // 移除最早的 2 条
+            }
+        }
+
+        // 构造请求 AI 时的 messages 数组：系统提示 + 最近10轮 + 当前用户输入
         function buildMessagesForAPI(userInput) {
-            // 1. 系统消息
+            // 1. system 提示
             const systemMessage = {
                 role: "system",
                 content: "你是ABC医院王医生，请针对患者或患者家属的提问给出合适的回复。回复要言简意赅，控制在100字以内。"
             };
 
-            // 2. 取 conversationMemory 中最多 10 轮的消息
-            // 如果大于 20 条消息，就取后 20 条
+            // 2. 取最近 20 条
             const startIndex = conversationMemory.length > 20 ? conversationMemory.length - 20 : 0;
             const trimmedMemory = conversationMemory.slice(startIndex);
 
-            // 3. 当前用户问题
-            const userMessage = {
-                role: "user",
-                content: userInput
-            };
+            // 3. 当前用户消息
+            const userMessage = { role: 'user', content: userInput };
 
-            // 最终 messages
+            // 组合
             return [systemMessage, ...trimmedMemory, userMessage];
         }
 
-        // 更新对话记忆数组
-        // 如果超出 10 轮，则丢弃最早的一轮（2 条消息）
-        function updateConversationMemory(role, content) {
-            // 推入新的消息
-            conversationMemory.push({ role, content });
+        //================== 4. 与AI交互 & TTS 播放 ==================//
 
-            // 如果超过 20 条消息（10 轮），则移除最早的 2 条
-            while (conversationMemory.length > 20) {
-                conversationMemory.shift(); // 移除最早的一条
-            }
-        }
-
-        // 获取 AI 回复
-        async function getAIResponse(userInput) {
-            addStatusLog('正在获取AI回复...', 'info');
-
-            // 先把用户输入存入记忆
-            // 这里不立即 push，因为 handleASRFinalResult 中已经执行了：updateConversationMemory("user", userInput)
-            // 如果你希望先把 userInput 存储，然后再组合请求，也可在 handleASRFinalResult 调用此处时修改逻辑
-
-            try {
-                // 构造 messages
-                const messages = buildMessagesForAPI(userInput);
-
-                const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': 'Bearer sk-38ad42271d60445f93b92dfa4df3e4c5'
-                    },
-                    body: JSON.stringify({
-                        model: "deepseek-chat",
-                        messages: messages,
-                        max_tokens: 400
-                    })
-                });
-                const data = await response.json();
-                addStatusLog('AI回复成功', 'success');
-
-                // 如果 AI 没有正常返回，则给一个默认提示
-                const aiText = data.choices && data.choices[0] 
-                               ? data.choices[0].message.content 
-                               : "抱歉，我现在无法回应。";
-
-                // 存储 AI 回复到对话记忆
-                updateConversationMemory("assistant", aiText);
-
-                return {
-                    content: aiText,
-                    resources: await getRecommendations(userInput)
-                };
-            } catch (error) {
-                addStatusLog(`AI响应错误: ${error.message}`, 'error');
-                return {
-                    content: "抱歉，我现在无法回应，请稍后再试。",
-                    resources: []
-                };
-            }
-        }
-
-        // 获取相关资源推荐（示例）
+        // 获取推荐资源示例
         async function getRecommendations(text) {
             addStatusLog('正在获取推荐资源...', 'info');
             const triggers = ['抑郁', '焦虑', '睡眠', '压力'];
@@ -361,11 +313,53 @@
             return [];
         }
 
+        // 获取 AI 回复
+        async function getAIResponse(userInput) {
+            addStatusLog('正在获取AI回复...', 'info');
+
+            // 构造消息上下文
+            const messages = buildMessagesForAPI(userInput);
+
+            try {
+                const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer sk-38ad42271d60445f93b92dfa4df3e4c5'
+                    },
+                    body: JSON.stringify({
+                        model: "deepseek-chat",
+                        messages: messages,
+                        max_tokens: 400
+                    })
+                });
+                const data = await response.json();
+                addStatusLog('AI回复成功', 'success');
+
+                const aiText = (data.choices && data.choices[0])
+                    ? data.choices[0].message.content
+                    : "抱歉，我现在无法回应。";
+
+                // 将AI的回复存入对话记忆
+                updateConversationMemory("assistant", aiText);
+
+                return {
+                    content: aiText,
+                    resources: await getRecommendations(userInput)
+                };
+            } catch (error) {
+                addStatusLog(`AI响应错误: ${error.message}`, 'error');
+                return {
+                    content: "抱歉，我现在无法回应，请稍后再试。",
+                    resources: []
+                };
+            }
+        }
+
         // 播放 TTS 语音
         async function playTTS(text) {
             addStatusLog('正在转换语音...', 'info');
             try {
-                // 保存麦克风的当前状态
                 const wasMutedBefore = isMuted;
                 if (!wasMutedBefore && audioStream) {
                     isMuted = true;
@@ -377,15 +371,16 @@
                     addStatusLog('播放语音时自动静音麦克风', 'info');
                 }
 
-                // 如果全局 AudioContext 尚未创建，则创建
+                // 如果还没有全局 AudioContext，就创建一个
                 if (!globalAudioContext) {
                     globalAudioContext = new (window.AudioContext || window.webkitAudioContext)({
                         sampleRate: 16000
                     });
                 }
 
-                // 请求 TTS 音频（请自行修改 TTS 服务地址）
+                // 向 TTS 服务请求音频
                 const encodedText = encodeURIComponent(text);
+                // 请根据实际服务器地址进行修改
                 const ttsUrl = `http://192.168.8.16:9880/?text=${encodedText}&text_language=zh`;
 
                 const response = await fetch(ttsUrl, { method: 'GET' });
@@ -398,15 +393,15 @@
                 const source = globalAudioContext.createBufferSource();
                 source.buffer = audioBuffer;
 
-                // 创建增益节点以支持淡出
+                // 创建增益节点以实现淡出
                 const gainNode = globalAudioContext.createGain();
                 gainNode.gain.setValueAtTime(1, globalAudioContext.currentTime);
                 source.connect(gainNode).connect(globalAudioContext.destination);
 
-                // 监听播放结束事件
+                // 监听播放结束
                 source.onended = () => {
                     addStatusLog('语音播放结束', 'info');
-                    // 恢复麦克风状态
+                    // 恢复麦克风
                     if (!wasMutedBefore && audioStream) {
                         isMuted = false;
                         audioStream.getAudioTracks().forEach(track => {
@@ -416,7 +411,7 @@
                         muteBtn.textContent = '🎤';
                         addStatusLog('恢复麦克风状态', 'info');
                     }
-                    // 清除 TTS 播放状态
+
                     currentTTSSource = null;
                     currentTTSContext = null;
                     // 禁用打断按钮
@@ -432,13 +427,13 @@
                 currentTTSSource = source;
                 currentTTSContext = globalAudioContext;
 
-                // 启用打断按钮
+                // 启用“打断”按钮
                 interruptBtn.disabled = false;
                 interruptBtn.classList.remove('disabled');
 
             } catch (error) {
                 addStatusLog(`TTS播放错误: ${error.message}`, 'error');
-                // 如果在播放过程中发生错误，确保恢复麦克风状态
+                // 如果发生错误，也要确保麦克风恢复
                 if (isMuted && !muteBtn.classList.contains('active') && audioStream) {
                     isMuted = false;
                     audioStream.getAudioTracks().forEach(track => {
@@ -451,24 +446,23 @@
             }
         }
 
-        //================== 优化后的中断 TTS 函数 ==================//
+        //================== 5. 打断 TTS 播放函数 ==================//
+
         async function interruptTTS() {
             if (currentTTSSource && currentTTSContext) {
                 addStatusLog('正在中断 TTS 播放...', 'info');
 
                 try {
-                    // 断开音源
                     currentTTSSource.disconnect();
                     addStatusLog('音频源已断开连接', 'info');
 
-                    // 创建一个增益节点执行快速淡出
+                    // 快速淡出
                     const gainNode = currentTTSContext.createGain();
                     currentTTSSource.connect(gainNode).connect(currentTTSContext.destination);
                     gainNode.gain.setValueAtTime(gainNode.gain.value, currentTTSContext.currentTime);
                     // 50ms淡出
                     gainNode.gain.exponentialRampToValueAtTime(0.00001, currentTTSContext.currentTime + 0.05);
 
-                    // 50ms后停止音源，再延迟恢复麦克风
                     setTimeout(() => {
                         try {
                             currentTTSSource.stop(0);
@@ -477,13 +471,11 @@
                             addStatusLog(`停止音源时发生错误: ${err.message}`, 'error');
                         }
 
-                        // 不关闭 globalAudioContext
-
-                        // 清理引用
+                        // 不关闭 globalAudioContext，供下次 TTS 使用
                         currentTTSSource = null;
                         currentTTSContext = null;
 
-                        // 再加一点延迟恢复麦克风
+                        // 等 100ms 再恢复麦克风
                         setTimeout(() => {
                             if (isMuted && audioStream) {
                                 isMuted = false;
@@ -494,18 +486,17 @@
                                 muteBtn.textContent = '🎤';
                                 addStatusLog('恢复麦克风状态', 'info');
                             }
-
-                            // 更新 UI
                             interruptBtn.disabled = true;
                             interruptBtn.classList.add('disabled');
                             addMessage('语音播放已中断，您可以继续咨询', 'system');
                         }, 100);
                     }, 50);
+
                 } catch (error) {
                     addStatusLog(`中断 TTS 播放失败: ${error.message}`, 'error');
                 }
             } else {
-                // 当前没有TTS在播放，也要确保麦克风恢复
+                // 当前无TTS在播，也要尝试恢复麦克风
                 if (isMuted && audioStream) {
                     isMuted = false;
                     audioStream.getAudioTracks().forEach(track => {
@@ -521,42 +512,42 @@
             }
         }
 
-        //================== WebSocket & 识别结果处理 ==================//
+        //================== 6. 短暂停顿合并识别逻辑 ==================//
 
-        // 把一次完整的话语合并后发送给AI并播放TTS
         async function handleASRFinalResult(text) {
-            // 将用户说的话存入 conversationMemory
-            // （注意：如果您想在 AI 回复后再统一管理，也可根据需求自行调整逻辑）
+            // 先将用户这句话更新到会话记忆
             updateConversationMemory("user", text);
 
-            // 先合并到 pendingText
-            pendingText = pendingText ? (pendingText + " " + text) : text;
             addStatusLog(`识别到最终文本: ${text}`, 'info');
+            // 累加到 pendingText
+            pendingText = pendingText ? (pendingText + " " + text) : text;
 
-            // 如果有尚未触发的定时器，先清除
+            // 如果有计时器，清除它
             if (finalTimer) {
                 clearTimeout(finalTimer);
                 finalTimer = null;
             }
 
-            // 重设一个定时器，1秒后触发
+            // 等待 1秒 后再执行
             finalTimer = setTimeout(async () => {
                 // 认为用户说话结束
                 const userInput = pendingText.trim();
-                addMessage(userInput, 'user'); // 在页面中显示用户文本
+                addMessage(userInput, 'user'); // 在界面上显示
 
-                // 请求AI并播放TTS
+                // 请求 AI
                 const aiResponse = await getAIResponse(userInput);
+                // 播放 TTS
                 await playTTS(aiResponse.content);
+                // 显示 AI 消息
                 addMessage(aiResponse.content, 'bot', aiResponse.resources);
 
-                // 清空合并缓冲
+                // 清空
                 pendingText = "";
                 finalTimer = null;
             }, WAIT_MS);
         }
 
-        //================== 通话控制逻辑 ==================//
+        //================== 7. 通话控制 ==================//
 
         async function startCall() {
             try {
@@ -569,24 +560,22 @@
                 });
                 addStatusLog('麦克风权限获取成功', 'success');
 
-                // 创建录音用 AudioContext
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({
                     sampleRate: 16000
                 });
 
-                // 加载 AudioWorklet
+                // AudioWorklet
                 const audioWorkletSource = document.getElementById('audioWorkletScript').textContent;
                 const workletBlob = new Blob([audioWorkletSource], { type: 'text/javascript' });
                 const workletUrl = URL.createObjectURL(workletBlob);
                 await audioContext.audioWorklet.addModule(workletUrl);
 
-                // 建立 WebSocket 连接
-                const wsUrl = 'wss://192.168.8.167:10096';
+                // WebSocket 连接
+                const wsUrl = 'wss://192.168.8.167:10096'; // 请根据实际环境修改
                 ws = new WebSocket(wsUrl);
 
-                ws.onopen = async () => {
+                ws.onopen = () => {
                     addStatusLog('WebSocket连接成功', 'success');
-                    // 发送 ASR 配置
                     const config = {
                         mode: "2pass",
                         chunk_size: [5, 10, 5],
@@ -599,7 +588,7 @@
                     ws.send(JSON.stringify(config));
                     addStatusLog('已发送ASR配置信息', 'info');
 
-                    // 连接到AudioWorklet
+                    // 连接 AudioWorklet
                     const source = audioContext.createMediaStreamSource(audioStream);
                     audioWorkletNode = new AudioWorkletNode(audioContext, 'audio-processor');
                     audioWorkletNode.port.onmessage = (event) => {
@@ -621,14 +610,16 @@
                     endCall();
                 };
 
-                ws.onmessage = async (event) => {
+                ws.onmessage = (event) => {
                     try {
                         const data = JSON.parse(event.data);
+                        // 当 ASR 返回 “2pass-offline” 表示一句话结束
                         if (data.text && data.mode === "2pass-offline") {
                             handleASRFinalResult(data.text);
                         }
-                    } catch (error) {
-                        addStatusLog(`处理消息错误: ${error.message}`, 'error');
+                        // 如果是 2pass-online 等其他模式，可自行处理
+                    } catch (err) {
+                        addStatusLog(`处理消息错误: ${err.message}`, 'error');
                     }
                 };
 
@@ -643,47 +634,45 @@
         }
 
         async function endCall() {
-            if (!isCallActive) {
-                return;
-            }
+            if (!isCallActive) return;
             addStatusLog('正在结束通话...', 'info');
             isCallActive = false;
 
             // 关闭 WebSocket
             if (ws) {
                 ws.close();
-                addStatusLog('WebSocket已关闭', 'info');
                 ws = null;
+                addStatusLog('WebSocket已关闭', 'info');
             }
-            
+
             // 断开音频处理器
             if (audioWorkletNode) {
                 audioWorkletNode.disconnect();
-                addStatusLog('音频处理器已断开', 'info');
                 audioWorkletNode = null;
+                addStatusLog('音频处理器已断开', 'info');
             }
-            
-            // 关闭录音的 AudioContext
+
+            // 关闭录音 AudioContext
             if (audioContext) {
                 try {
                     if (audioContext.state !== 'closed') {
                         await audioContext.close();
-                        addStatusLog('捕获用AudioContext已关闭', 'info');
+                        addStatusLog('捕获用AudioContext已关闭', 'success');
                     }
-                } catch (error) {
-                    addStatusLog(`关闭AudioContext失败: ${error.message}`, 'error');
+                } catch (err) {
+                    addStatusLog(`关闭AudioContext失败: ${err.message}`, 'error');
                 }
                 audioContext = null;
             }
-            
+
             // 停止音频流
             if (audioStream) {
                 audioStream.getTracks().forEach(track => track.stop());
-                addStatusLog('音频流已关闭', 'info');
                 audioStream = null;
+                addStatusLog('音频流已关闭', 'info');
             }
 
-            // 如果有尚未处理的合并文本，直接清空
+            // 如果有尚未合并的文本，清空
             if (pendingText) {
                 pendingText = "";
             }
@@ -692,19 +681,18 @@
                 finalTimer = null;
             }
 
-            // 如果有 TTS 正在播放，强制中断
+            // 如果有 TTS 正在播放，则打断
             if (currentTTSSource) {
                 interruptTTS();
             }
 
-            // 更新 UI
             callBtn.classList.remove('active');
             callStatus.style.display = 'none';
-            addMessage('通话已结束');
+            addMessage('通话已结束', 'system');
             addStatusLog('通话结束完成', 'success');
         }
 
-        //================== 按钮事件绑定 ==================//
+        //================== 8. 按钮事件绑定 ==================//
 
         callBtn.onclick = () => {
             if (!isCallActive) {
@@ -732,40 +720,37 @@
             }
         };
 
-        //================== 页面加载/卸载处理 ==================//
+        //================== 9. 页面加载/卸载处理 ==================//
 
-        window.onload = async () => {
+        window.onload = () => {
             addStatusLog('页面初始化开始', 'info');
-            
-            // 简要功能检查
+
+            // 简要检查浏览器兼容性
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                addStatusLog('您的浏览器不支持音频输入 (getUserMedia)', 'error');
+                addStatusLog('您的浏览器不支持 getUserMedia', 'error');
                 return;
             }
             if (!window.WebSocket) {
-                addStatusLog('您的浏览器不支持WebSocket', 'error');
+                addStatusLog('您的浏览器不支持 WebSocket', 'error');
                 return;
             }
             if (!window.AudioContext && !window.webkitAudioContext) {
-                addStatusLog('您的浏览器不支持Web Audio API', 'error');
+                addStatusLog('您的浏览器不支持 Web Audio API', 'error');
+                return;
+            }
+            try {
+                const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (!tmpCtx.audioWorklet) {
+                    addStatusLog('您的浏览器不支持 AudioWorklet', 'error');
+                    tmpCtx.close();
+                    return;
+                }
+                tmpCtx.close();
+            } catch (err) {
+                addStatusLog(`AudioContext 初始化失败: ${err.message}`, 'error');
                 return;
             }
 
-            // 快速检查 AudioWorklet
-            let tempContext;
-            try {
-                tempContext = new (window.AudioContext || window.webkitAudioContext)();
-                if (!tempContext.audioWorklet) {
-                    addStatusLog('您的浏览器不支持AudioWorklet', 'error');
-                    tempContext.close();
-                    return;
-                }
-                tempContext.close();
-            } catch (err) {
-                addStatusLog(`音频上下文初始化失败: ${err.message}`, 'error');
-                return;
-            }
-            
             addStatusLog('浏览器功能检查完成', 'success');
             addStatusLog('页面初始化完成', 'success');
             addMessage('系统就绪，点击通话按钮开始咨询');
