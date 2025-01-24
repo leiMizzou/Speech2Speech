@@ -5,7 +5,7 @@
 ## 视频演示
 
 系统的实际运行效果。
-<iframe width="640" height="360" src="https://www.bilibili.com/video/BV1UBfHYYEHw/" frameborder="0" allowfullscreen></iframe>
+[![Speech2Speech Demo](https://i2.hdslb.com/bfs/archive/0ef0020c4ddcdd773663f05d8b44712bb0c9c976.jpg)](https://www.bilibili.com/video/BV1UBfHYYEHw/)
 
 ## 系统架构
 
