@@ -4,8 +4,7 @@
 
 ## 视频演示
 
-系统的实际运行效果。
-[Speech2Speech Demo](https://www.bilibili.com/video/BV1UBfHYYEHw/)
+系统的实际运行效果 [Speech2Speech Demo](https://www.bilibili.com/video/BV1UBfHYYEHw/)
 
 ## 系统架构
 
