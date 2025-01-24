@@ -5,7 +5,7 @@
 ## 视频演示
 
 系统的实际运行效果。
-<video src="examples/demo.mov" controls width="640"></video>
+<iframe src="//player.bilibili.com/player.html?aid=821634675&bvid=BV1UBfHYYEHw&cid=1139916636&page=1" scrolling="no" border="0" frameborder="no" framespacing="0" allowfullscreen="true" width="640" height="360"> </iframe>
 
 ## 系统架构
 
