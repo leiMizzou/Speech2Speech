@@ -1,5 +1,6 @@
 # Speech2Speech
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
+
 基于ASR+LLM+TTS的智能对话框架，实现语音到语音的实时交互系统，主要应用于心理咨询场景。提供了两种部署方式：HTML单页应用和Jupyter Notebook。
 
 ## 视频演示
